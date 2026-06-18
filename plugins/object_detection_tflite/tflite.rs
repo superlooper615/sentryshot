@@ -103,9 +103,30 @@ impl TfliteBackend for TfliteBackendImpl {
         device_path: String,
     ) -> Result<ArcDetector, DynError> {
         let device_cache: &mut DeviceCache = &mut self.device_cache;
-        logger.log(LogLevel::Info, &format!("starting detector '{name}'"));
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "starting detector '{name}' with EdgeTPU device '{device_path}' (model: {})",
+                model_path.display()
+            ),
+        );
+        logger.log(
+            LogLevel::Debug,
+            &format!(
+                "EdgeTPU devices visible to backend: {}",
+                format_edgetpu_devices(device_cache.devices())
+            ),
+        );
 
         let Some(device) = device_cache.device(&device_path) else {
+            logger.log(
+                LogLevel::Warning,
+                &format!(
+                    "configured EdgeTPU device '{}' is not in discovered list: {}",
+                    device_path,
+                    format_edgetpu_devices(device_cache.devices())
+                ),
+            );
             let err = debug_device(device_path, device_cache.devices());
             return Err(NewDetectorError::DebugDevice(err).into());
         };
@@ -118,7 +139,21 @@ impl TfliteBackend for TfliteBackendImpl {
         ) {
             Ok(v) => v,
             Err(e) => {
+                logger.log(
+                    LogLevel::Warning,
+                    &format!(
+                        "failed to create EdgeTPU detector '{name}' on '{}': {e}",
+                        device.path
+                    ),
+                );
                 if matches!(e, NewDetectorError::EdgetpuDelegateCreate) {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!(
+                            "EdgeTPU delegate creation failed for '{}'; running device diagnostics",
+                            device.path
+                        ),
+                    );
                     let _ = debug_device(device_path, device_cache.devices());
                 }
                 return Err(Box::new(e));
@@ -127,8 +162,11 @@ impl TfliteBackend for TfliteBackendImpl {
 
         let (detect_tx, detect_rx) = async_channel::bounded::<DetectRequest>(1);
         let rt_handle2 = self.rt_handle.clone();
+        let logger = logger.clone();
+        let detector_name = name.to_string();
         self.rt_handle.spawn(async move {
             let _task_token = task_token;
+            let mut consecutive_errors = 0_u64;
             while let Ok(mut req) = detect_rx.recv().await {
                 let result;
                 (detector, result) = rt_handle2
@@ -138,8 +176,35 @@ impl TfliteBackend for TfliteBackendImpl {
                     })
                     .await
                     .expect("join");
-                let result = result.map(|v| parse_detections(&label_map, v));
-                _ = req.res.send(result);
+                let response = match result {
+                    Ok(v) => {
+                        if consecutive_errors != 0 {
+                            logger.log(
+                                LogLevel::Info,
+                                &format!(
+                                    "EdgeTPU detector '{detector_name}' recovered after {} consecutive failures",
+                                    consecutive_errors
+                                ),
+                            );
+                        }
+                        consecutive_errors = 0;
+                        Ok(parse_detections(&label_map, v))
+                    }
+                    Err(err) => {
+                        consecutive_errors += 1;
+                        if consecutive_errors == 1 || consecutive_errors % 25 == 0 {
+                            logger.log(
+                                LogLevel::Warning,
+                                &format!(
+                                    "EdgeTPU detector '{detector_name}' inference failed ({} consecutive): {err}",
+                                    consecutive_errors
+                                ),
+                            );
+                        }
+                        Err(err)
+                    }
+                };
+                _ = req.res.send(response);
             }
         });
         Ok(Arc::new(TfliteDetector {
@@ -273,6 +338,17 @@ impl DeviceCache {
     fn device(&mut self, path: &str) -> Option<&EdgetpuDevice> {
         self.devices().iter().find(|device| device.path == path)
     }
+}
+
+fn format_edgetpu_devices(devices: &[EdgetpuDevice]) -> String {
+    if devices.is_empty() {
+        return "none".to_owned();
+    }
+    devices
+        .iter()
+        .map(std::string::ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn convert_format(val: TfliteFormat) -> ModelFormat {
