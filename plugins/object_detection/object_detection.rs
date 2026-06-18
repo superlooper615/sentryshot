@@ -368,14 +368,11 @@ impl ObjectDetectionPlugin {
                 parse_detections(&config.thresholds, &config.mask, &uncrop, detections)?;
 
             // Continue if there are no detections.
-            let Some(d) = detections.first() else {
+            if detections.is_empty() {
                 continue;
-            };
+            }
 
-            msg_logger.log(
-                LogLevel::Debug,
-                &format!("trigger: label:{} score:{:.1}", d.label, d.score),
-            );
+            log_detection_results(msg_logger, &detections);
 
             monitor
                 .trigger(
@@ -389,6 +386,40 @@ impl ObjectDetectionPlugin {
                 )
                 .await?;
         }
+    }
+}
+
+fn log_detection_results(msg_logger: &ArcMsgLogger, detections: &[Detection]) {
+    let total = detections.len();
+    for (index, detection) in detections.iter().enumerate() {
+        let Some(rectangle) = &detection.region.rectangle else {
+            msg_logger.log(
+                LogLevel::Info,
+                &format!(
+                    "inference result {}/{}: label={} score={:.1} region=none",
+                    index + 1,
+                    total,
+                    detection.label,
+                    detection.score,
+                ),
+            );
+            continue;
+        };
+
+        msg_logger.log(
+            LogLevel::Info,
+            &format!(
+                "inference result {}/{}: label={} score={:.1} box=x:{} y:{} w:{} h:{}",
+                index + 1,
+                total,
+                detection.label,
+                detection.score,
+                rectangle.x,
+                rectangle.y,
+                rectangle.width.get(),
+                rectangle.height.get(),
+            ),
+        );
     }
 }
 
