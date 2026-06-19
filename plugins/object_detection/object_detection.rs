@@ -10,10 +10,11 @@ mod remote;
 use crate::detector::DetectorManager;
 use async_trait::async_trait;
 use axum::{
+    Json,
     extract::{Path, State},
     http::{StatusCode, uri::InvalidUri},
     response::{IntoResponse, Response},
-    routing::patch,
+    routing::{get, patch},
 };
 use common::{
     ArcLogger, ArcMsgLogger, Detection, Detections, DynEnvConfig, DynError, Event, LogEntry,
@@ -42,6 +43,7 @@ use sentryshot_util::ImageCopyToBufferError;
 use serde_json::Value;
 use std::{
     borrow::Cow,
+    collections::HashMap,
     ffi::c_char,
     future::Future,
     num::{NonZeroU16, NonZeroU32, TryFromIntError},
@@ -50,7 +52,7 @@ use std::{
 };
 
 use thiserror::Error;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::RwLock};
 use tokio_util::{sync::CancellationToken, task::task_tracker::TaskTrackerToken};
 use url::Url;
 
@@ -93,6 +95,7 @@ pub struct ObjectDetectionPlugin {
     logger: ArcLogger,
     monitor_manager: ArcMonitorManager,
     detector_manager: DetectorManager,
+    recent_events: Arc<RwLock<HashMap<MonitorId, Event>>>,
 }
 
 impl ObjectDetectionPlugin {
@@ -129,6 +132,7 @@ impl ObjectDetectionPlugin {
             logger,
             monitor_manager,
             detector_manager,
+            recent_events: Arc::new(RwLock::new(HashMap::new())),
         }
     }
 }
@@ -167,12 +171,27 @@ impl Plugin for ObjectDetectionPlugin {
         };
     }
 
+    async fn on_event(&self, event: Event, config: common::monitor::MonitorConfig) {
+        if event.source.as_ref().map(ToString::to_string).as_deref() != Some("object") {
+            return;
+        }
+        self.recent_events
+            .write()
+            .await
+            .insert(config.id().to_owned(), event);
+    }
+
     fn route(&self, router: Router) -> Router {
         let state = HandlerState {
             logger: self.logger.clone(),
             monitor_manager: self.monitor_manager.clone(),
+            recent_events: self.recent_events.clone(),
         };
         router
+            .route_user_no_csrf(
+                "/api/monitor/{id}/object-detection/recent",
+                get(recent_handler).with_state(state.clone()),
+            )
             .route_admin(
                 "/api/monitor/{id}/object-detection/enable",
                 patch(enable_handler).with_state(state.clone()),
@@ -877,6 +896,14 @@ impl Fetcher for Fetch {
 struct HandlerState {
     logger: ArcLogger,
     monitor_manager: ArcMonitorManager,
+    recent_events: Arc<RwLock<HashMap<MonitorId, Event>>>,
+}
+
+async fn recent_handler(State(state): State<HandlerState>, Path(id): Path<MonitorId>) -> Response {
+    let Some(event) = state.recent_events.read().await.get(&id).cloned() else {
+        return StatusCode::NO_CONTENT.into_response();
+    };
+    Json(event).into_response()
 }
 
 async fn enable_handler(

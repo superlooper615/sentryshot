@@ -3,6 +3,7 @@
 // @ts-check
 
 import { uniqueID, sleep, relativePathname, htmlToElem } from "../libs/common.js";
+import { newDetectionOverlay } from "./detectionOverlay.js";
 import { newFeed } from "./feed.js";
 import Hls from "../vendor/hls.js";
 
@@ -63,6 +64,7 @@ function newSlowPollStream(monitor, preferLowRes, buttons = []) {
 		></video>
 	`);
 	const checkboxID = uniqueID();
+	const abort = new AbortController();
 	const elem = htmlToElem(
 		/* HTML */ `
 			<div
@@ -71,6 +73,7 @@ function newSlowPollStream(monitor, preferLowRes, buttons = []) {
 			></div>
 		`,
 		[
+			newDetectionOverlay(abort.signal, monitorId),
 			htmlToElem(/* HTML */ `
 				<input
 					id="${checkboxID}"
@@ -106,7 +109,6 @@ function newSlowPollStream(monitor, preferLowRes, buttons = []) {
 			button.init($overlay, $video);
 		}
 	}
-	const abort = new AbortController();
 	const debugOverlay = newDebugOverlay(elem);
 	newStream(abort.signal, $video, debugOverlay, monitorId, subStream);
 
