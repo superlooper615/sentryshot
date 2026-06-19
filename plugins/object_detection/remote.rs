@@ -47,7 +47,11 @@ impl RemoteDetector {
 #[async_trait]
 impl Detector for RemoteDetector {
     async fn detect(&self, data: Vec<u8>) -> Result<Option<Detections>, DynError> {
-        let detections = tokio::time::timeout(self.timeout, self.detect_inner(data))
+        let timeout = {
+            let _enter = self.rt_handle.enter();
+            tokio::time::timeout(self.timeout, self.detect_inner(data))
+        };
+        let detections = timeout
             .await
             .map_err(|_| RemoteDetectError::Timeout(self.timeout))??;
         Ok(Some(detections))
