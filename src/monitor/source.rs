@@ -30,6 +30,9 @@ use tokio::{
 use tokio_util::{sync::CancellationToken, task::task_tracker::TaskTrackerToken};
 use url::Url;
 
+const RTSP_RESTART_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2);
+const RTSP_RAW_FEED_BUFFER: usize = 64;
+
 #[allow(clippy::module_name_repetitions)]
 pub struct MonitorSource {
     stream_type: StreamType,
@@ -208,12 +211,18 @@ impl SourceRtsp {
 
                 match source.run(token2.child_token(), started_tx.clone()).await {
                     Ok(()) => source.log(LogLevel::Debug, "cancelled"),
+                    Err(e) if e.is_recoverable() => {
+                        source.log(
+                            LogLevel::Warning,
+                            &format!("recovering after stream error: {e}"),
+                        );
+                    }
                     Err(e) => source.log(LogLevel::Error, &format!("crashed: {e}")),
                 };
 
                 tokio::select! {
                     () = token2.cancelled() => {}
-                    () = tokio::time::sleep(tokio::time::Duration::from_secs(10)) => {}
+                    () = tokio::time::sleep(RTSP_RESTART_DELAY) => {}
                 }
             }
         });
@@ -350,8 +359,7 @@ impl SourceRtsp {
             .demuxed()
             .map_err(Demuxed)?;
 
-        // Buffer 10 frame to reduce dropped frames.
-        let (feed_tx, _) = broadcast::channel(10);
+        let (feed_tx, _) = broadcast::channel(RTSP_RAW_FEED_BUFFER);
 
         let mut stream_started: Option<StreamStarted> = None;
         loop {
@@ -547,6 +555,20 @@ enum SourceRtspRunError {
     CameraClockBehind(i64),
 }
 
+impl SourceRtspRunError {
+    fn is_recoverable(&self) -> bool {
+        matches!(
+            self,
+            Self::Eof
+                | Self::Stream(_)
+                | Self::WriteH264(_)
+                | Self::ParseFrame(_)
+                | Self::CameraClockAhead(_)
+                | Self::CameraClockBehind(_)
+        )
+    }
+}
+
 #[derive(Debug, Error)]
 enum RemoveCreds {
     #[error("set password")]
@@ -618,9 +640,13 @@ fn new_decoder(
                     // Close receiver by dropping sender.
                     return;
                 }
-                Err(RecvError::Lagged(_)) => {
+                Err(RecvError::Lagged(dropped)) => {
+                    logger.log(
+                        LogLevel::Warning,
+                        &format!("h264 decoder: dropped {dropped} raw frames; skipping ahead"),
+                    );
                     _ = frame_tx.send(Err(DroppedFrames)).await;
-                    return;
+                    continue;
                 }
             };
 
