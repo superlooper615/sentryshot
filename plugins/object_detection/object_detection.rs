@@ -5,6 +5,7 @@ mod config;
 mod detector;
 mod label;
 mod model;
+mod remote;
 
 use crate::detector::DetectorManager;
 use async_trait::async_trait;

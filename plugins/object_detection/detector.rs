@@ -6,6 +6,7 @@ use crate::{
     config::Percent,
     label::{CreateLabelCacheError, LabelCache, LabelCacheError},
     model::{CreateModelCacheError, ModelCache, ModelCacheError, ModelChecksum},
+    remote::RemoteDetector,
 };
 use common::{ArcMsgLogger, DynError, Label, Labels, LogLevel};
 use plugin::object_detection::{ArcDetector, DetectorName, TfliteFormat};
@@ -13,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Debug,
-    num::{NonZeroU8, NonZeroU16},
+    num::{NonZeroU8, NonZeroU16, NonZeroU64},
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -29,6 +30,9 @@ struct RawDetectorConfigs {
 
     #[serde(rename = "detector_edgetpu")]
     edgetpu: Vec<RawDetectorConfigEdgeTpu>,
+
+    #[serde(rename = "detector_remote")]
+    remote: Vec<RawDetectorConfigRemote>,
 }
 
 #[derive(Debug, Deserialize, PartialEq, Eq)]
@@ -59,6 +63,26 @@ struct RawDetectorConfigEdgeTpu {
     #[serde(default)]
     format: TfliteFormat,
     device: String,
+}
+
+#[derive(Debug, Deserialize, PartialEq, Eq)]
+struct RawDetectorConfigRemote {
+    enable: bool,
+    name: DetectorName,
+    width: NonZeroU16,
+    height: NonZeroU16,
+    endpoint: Url,
+    label_map: Url,
+
+    #[serde(default = "default_remote_timeout_ms")]
+    timeout_ms: NonZeroU64,
+}
+
+fn default_remote_timeout_ms() -> NonZeroU64 {
+    match NonZeroU64::new(3000) {
+        Some(v) => v,
+        None => unreachable!("3000 is non-zero"),
+    }
 }
 
 type DetectorConfigs = HashMap<DetectorName, DetectorConfig>;
@@ -157,6 +181,7 @@ impl DetectorManager {
         let mut backend_loader = BackendLoader::new(rt_handle, plugin_dir);
 
         parse_detector_configs(
+            rt_handle,
             &mut backend_loader,
             task_token,
             logger,
@@ -184,6 +209,7 @@ pub(crate) fn write_detector_config(path: &Path) -> Result<(), std::io::Error> {
 }
 
 async fn parse_detector_configs(
+    rt_handle: Handle,
     backend_loader: &mut BackendLoader,
     task_token: TaskTrackerToken,
     logger: ArcMsgLogger,
@@ -267,6 +293,41 @@ async fn parse_detector_configs(
             )
             .map_err(CreateDetector)?;
         detectors.insert(edgetpu.name, detector);
+    }
+
+    for remote in configs.remote {
+        if !remote.enable {
+            logger.log(
+                LogLevel::Debug,
+                &format!("detector '{}' disabled", remote.name),
+            );
+            continue;
+        }
+        let label_map = label_cache.get(&remote.label_map).await?;
+        if detector_configs.contains_key(&remote.name) {
+            return Err(Duplicate(remote.name));
+        };
+        let config = DetectorConfig {
+            width: remote.width,
+            height: remote.height,
+            labels: label_map.values().cloned().collect(),
+        };
+        detector_configs.insert(remote.name.clone(), config);
+        logger.log(
+            LogLevel::Info,
+            &format!(
+                "starting remote detector '{}' at '{}'",
+                remote.name, remote.endpoint
+            ),
+        );
+        let detector = RemoteDetector::new(
+            rt_handle.clone(),
+            remote.width,
+            remote.height,
+            remote.endpoint,
+            remote.timeout_ms,
+        );
+        detectors.insert(remote.name, detector);
     }
 
     Ok(DetectorManager {

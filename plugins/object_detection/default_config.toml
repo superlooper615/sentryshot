@@ -29,6 +29,15 @@ sha256sum = "2816b5f401b0ac168584c83554e06e4744c86ecd688c857289438093d32a20ef"
 label_map = "https://codeberg.org/Curid/TF-CCTV/raw/branch/master/labels/person-map.txt"
 device = "/sys/bus/usb/devices/x"
 
+[[detector_remote]]
+enable = false
+name = "remote_mac_coral"
+width = 340
+height = 340
+endpoint = "http://127.0.0.1:8765/detect"
+label_map = "https://codeberg.org/Curid/TF-CCTV/raw/branch/master/labels/person-map.txt"
+timeout_ms = 3000
+
 
 # WebUI documentation: ./plugins/object_detection/README.md
 #
@@ -42,3 +51,6 @@ device = "/sys/bus/usb/devices/x"
 # There are two environment variables you can use for debugging
 # `EDGETPU_LOG_LEVEL=10` and `LIBUSB_DEBUG=4`
 # https://github.com/google-coral/edgetpu/issues/536
+
+# Remote detectors receive the already-cropped/scaled rgb24 detector frame over HTTP
+# and return Sentryshot-normalized detections.
