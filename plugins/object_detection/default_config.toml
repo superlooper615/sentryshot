@@ -32,10 +32,10 @@ device = "/sys/bus/usb/devices/x"
 [[detector_remote]]
 enable = false
 name = "remote_mac_coral"
-width = 340
-height = 340
+width = 320
+height = 320
 endpoint = "http://127.0.0.1:8765/detect"
-label_map = "https://codeberg.org/Curid/TF-CCTV/raw/branch/master/labels/person-map.txt"
+label_map = "https://codeberg.org/Curid/TF-CCTV/raw/branch/master/labels/mscoco-map.txt"
 timeout_ms = 3000
 
 
