@@ -47,13 +47,23 @@ impl RemoteDetector {
 #[async_trait]
 impl Detector for RemoteDetector {
     async fn detect(&self, data: Vec<u8>) -> Result<Option<Detections>, DynError> {
-        let timeout = {
-            let _enter = self.rt_handle.enter();
-            tokio::time::timeout(self.timeout, self.detect_inner(data))
-        };
-        let detections = timeout
+        let rt_handle = self.rt_handle.clone();
+        let task_rt_handle = rt_handle.clone();
+        let width = self.width;
+        let height = self.height;
+        let endpoint = self.endpoint.clone();
+        let timeout_duration = self.timeout;
+
+        let task = rt_handle.spawn(async move {
+            tokio::time::timeout(
+                timeout_duration,
+                detect_inner(task_rt_handle, width, height, endpoint, data),
+            )
             .await
-            .map_err(|_| RemoteDetectError::Timeout(self.timeout))??;
+            .map_err(|_| RemoteDetectError::Timeout(timeout_duration))?
+        });
+
+        let detections = task.await.map_err(RemoteDetectError::Join)??;
         Ok(Some(detections))
     }
 
@@ -66,36 +76,42 @@ impl Detector for RemoteDetector {
     }
 }
 
-impl RemoteDetector {
-    async fn detect_inner(&self, data: Vec<u8>) -> Result<Detections, RemoteDetectError> {
-        let uri: Uri = self.endpoint.as_str().parse()?;
-        let https = hyper_rustls::HttpsConnectorBuilder::new()
-            .with_webpki_roots()
-            .https_or_http()
-            .enable_http1()
-            .build();
-        let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor(self.rt_handle.clone()))
-            .build(https);
+async fn detect_inner(
+    rt_handle: Handle,
+    width: NonZeroU16,
+    height: NonZeroU16,
+    endpoint: Url,
+    data: Vec<u8>,
+) -> Result<Detections, RemoteDetectError> {
+    let uri: Uri = endpoint.as_str().parse()?;
+    let https = hyper_rustls::HttpsConnectorBuilder::new()
+        .with_webpki_roots()
+        .https_or_http()
+        .enable_http1()
+        .build();
+    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor(rt_handle)).build(https);
 
-        let request = Request::builder()
-            .method("POST")
-            .uri(uri)
-            .header(header::CONTENT_TYPE, "application/octet-stream")
-            .header("x-width", self.width.get().to_string())
-            .header("x-height", self.height.get().to_string())
-            .header("x-format", "rgb24")
-            .body(Full::new(Bytes::from(data)))?;
+    let request = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/octet-stream")
+        .header("x-width", width.get().to_string())
+        .header("x-height", height.get().to_string())
+        .header("x-format", "rgb24")
+        .body(Full::new(Bytes::from(data)))?;
 
-        let response = client.request(request).await?;
-        let status = response.status();
-        let body = response.into_body().collect().await?.to_bytes();
-        if status != StatusCode::OK {
-            return Err(RemoteDetectError::Status(status, String::from_utf8_lossy(&body).into()));
-        }
-
-        let response: RemoteDetectResponse = serde_json::from_slice(&body)?;
-        Ok(response.detections)
+    let response = client.request(request).await?;
+    let status = response.status();
+    let body = response.into_body().collect().await?.to_bytes();
+    if status != StatusCode::OK {
+        return Err(RemoteDetectError::Status(
+            status,
+            String::from_utf8_lossy(&body).into(),
+        ));
     }
+
+    let response: RemoteDetectResponse = serde_json::from_slice(&body)?;
+    Ok(response.detections)
 }
 
 #[derive(Debug, Deserialize)]
@@ -125,4 +141,7 @@ enum RemoteDetectError {
 
     #[error("remote detector timed out after {0:?}")]
     Timeout(Duration),
+
+    #[error("remote detector task: {0}")]
+    Join(#[from] tokio::task::JoinError),
 }
