@@ -2,12 +2,11 @@
 
 use async_trait::async_trait;
 use common::{Detections, DynError};
-use http_body_util::{BodyExt, Full};
-use hyper::{Request, StatusCode, Uri, body::Bytes, header};
-use hyper_util::client::legacy::Client;
 use plugin::object_detection::{ArcDetector, Detector};
 use serde::Deserialize;
 use std::{
+    io::{Read, Write},
+    net::{TcpStream, ToSocketAddrs},
     num::{NonZeroU16, NonZeroU64},
     sync::Arc,
     time::Duration,
@@ -15,8 +14,6 @@ use std::{
 use thiserror::Error;
 use tokio::runtime::Handle;
 use url::Url;
-
-use crate::TokioExecutor;
 
 pub(crate) struct RemoteDetector {
     rt_handle: Handle,
@@ -47,21 +44,14 @@ impl RemoteDetector {
 #[async_trait]
 impl Detector for RemoteDetector {
     async fn detect(&self, data: Vec<u8>) -> Result<Option<Detections>, DynError> {
-        let rt_handle = self.rt_handle.clone();
-        let task_rt_handle = rt_handle.clone();
         let width = self.width;
         let height = self.height;
         let endpoint = self.endpoint.clone();
-        let timeout_duration = self.timeout;
+        let timeout = self.timeout;
 
-        let task = rt_handle.spawn(async move {
-            tokio::time::timeout(
-                timeout_duration,
-                detect_inner(task_rt_handle, width, height, endpoint, data),
-            )
-            .await
-            .map_err(|_| RemoteDetectError::Timeout(timeout_duration))?
-        });
+        let task = self
+            .rt_handle
+            .spawn_blocking(move || detect_blocking(width, height, endpoint, timeout, data));
 
         let detections = task.await.map_err(RemoteDetectError::Join)??;
         Ok(Some(detections))
@@ -76,42 +66,75 @@ impl Detector for RemoteDetector {
     }
 }
 
-async fn detect_inner(
-    rt_handle: Handle,
+fn detect_blocking(
     width: NonZeroU16,
     height: NonZeroU16,
     endpoint: Url,
+    timeout: Duration,
     data: Vec<u8>,
 ) -> Result<Detections, RemoteDetectError> {
-    let uri: Uri = endpoint.as_str().parse()?;
-    let https = hyper_rustls::HttpsConnectorBuilder::new()
-        .with_webpki_roots()
-        .https_or_http()
-        .enable_http1()
-        .build();
-    let client: Client<_, Full<Bytes>> = Client::builder(TokioExecutor(rt_handle)).build(https);
-
-    let request = Request::builder()
-        .method("POST")
-        .uri(uri)
-        .header(header::CONTENT_TYPE, "application/octet-stream")
-        .header("x-width", width.get().to_string())
-        .header("x-height", height.get().to_string())
-        .header("x-format", "rgb24")
-        .body(Full::new(Bytes::from(data)))?;
-
-    let response = client.request(request).await?;
-    let status = response.status();
-    let body = response.into_body().collect().await?.to_bytes();
-    if status != StatusCode::OK {
-        return Err(RemoteDetectError::Status(
-            status,
-            String::from_utf8_lossy(&body).into(),
-        ));
+    if endpoint.scheme() != "http" {
+        return Err(RemoteDetectError::UnsupportedScheme(endpoint.scheme().to_owned()));
     }
 
-    let response: RemoteDetectResponse = serde_json::from_slice(&body)?;
+    let host = endpoint.host_str().ok_or(RemoteDetectError::MissingHost)?;
+    let port = endpoint.port_or_known_default().ok_or(RemoteDetectError::MissingPort)?;
+    let mut addrs = (host, port).to_socket_addrs()?;
+    let addr = addrs.next().ok_or(RemoteDetectError::ResolveEmpty)?;
+    let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
+    stream.set_read_timeout(Some(timeout))?;
+    stream.set_write_timeout(Some(timeout))?;
+
+    let mut path = endpoint.path().to_owned();
+    if path.is_empty() {
+        path.push('/');
+    }
+    if let Some(query) = endpoint.query() {
+        path.push('?');
+        path.push_str(query);
+    }
+
+    let host_header = if endpoint.port().is_some() {
+        format!("{host}:{port}")
+    } else {
+        host.to_owned()
+    };
+    let header = format!(
+        "POST {path} HTTP/1.1\r\nHost: {host_header}\r\nContent-Type: application/octet-stream\r\nx-width: {}\r\nx-height: {}\r\nx-format: rgb24\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        width.get(),
+        height.get(),
+        data.len(),
+    );
+    stream.write_all(header.as_bytes())?;
+    stream.write_all(&data)?;
+
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response)?;
+    let header_end = response
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .ok_or(RemoteDetectError::BadResponse("missing header terminator"))?;
+    let (headers, body) = response.split_at(header_end + 4);
+    let headers = std::str::from_utf8(headers)
+        .map_err(|_| RemoteDetectError::BadResponse("headers are not utf8"))?;
+    let status = parse_status(headers)?;
+    if status != 200 {
+        return Err(RemoteDetectError::Status(status, String::from_utf8_lossy(body).into()));
+    }
+
+    let response: RemoteDetectResponse = serde_json::from_slice(body)?;
     Ok(response.detections)
+}
+
+fn parse_status(headers: &str) -> Result<u16, RemoteDetectError> {
+    let status = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .ok_or(RemoteDetectError::BadResponse("missing status"))?;
+    status
+        .parse()
+        .map_err(|_| RemoteDetectError::BadResponse("bad status"))
 }
 
 #[derive(Debug, Deserialize)]
@@ -121,26 +144,29 @@ struct RemoteDetectResponse {
 
 #[derive(Debug, Error)]
 enum RemoteDetectError {
-    #[error("parse uri: {0}")]
-    ParseUri(#[from] hyper::http::uri::InvalidUri),
+    #[error("unsupported URL scheme: {0}")]
+    UnsupportedScheme(String),
 
-    #[error("build request: {0}")]
-    BuildRequest(#[from] hyper::http::Error),
+    #[error("endpoint is missing a host")]
+    MissingHost,
 
-    #[error("request: {0}")]
-    Request(#[from] hyper_util::client::legacy::Error),
+    #[error("endpoint is missing a port")]
+    MissingPort,
 
-    #[error("collect response: {0}")]
-    Collect(#[from] hyper::Error),
+    #[error("resolve endpoint: no addresses returned")]
+    ResolveEmpty,
+
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("bad response: {0}")]
+    BadResponse(&'static str),
 
     #[error("remote detector returned HTTP {0}: {1}")]
-    Status(StatusCode, String),
+    Status(u16, String),
 
     #[error("decode response: {0}")]
     DecodeResponse(#[from] serde_json::Error),
-
-    #[error("remote detector timed out after {0:?}")]
-    Timeout(Duration),
 
     #[error("remote detector task: {0}")]
     Join(#[from] tokio::task::JoinError),
