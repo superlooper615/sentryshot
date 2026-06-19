@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use common::{Detections, DynError};
 use http_body_util::{BodyExt, Full};
-use hyper::{Request, StatusCode, body::Bytes, header};
+use hyper::{Request, StatusCode, Uri, body::Bytes, header};
 use hyper_util::client::legacy::Client;
 use plugin::object_detection::{ArcDetector, Detector};
 use serde::Deserialize;
@@ -68,7 +68,7 @@ impl Detector for RemoteDetector {
 
 impl RemoteDetector {
     async fn detect_inner(&self, data: Vec<u8>) -> Result<Detections, RemoteDetectError> {
-        let uri = self.endpoint.as_str().parse()?;
+        let uri: Uri = self.endpoint.as_str().parse()?;
         let https = hyper_rustls::HttpsConnectorBuilder::new()
             .with_webpki_roots()
             .https_or_http()

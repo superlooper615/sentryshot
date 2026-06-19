@@ -178,7 +178,7 @@ impl DetectorManager {
         let raw_config = std::fs::read_to_string(config_path).map_err(ReadConfig)?;
         let detector_configs = parse_raw_detector_configs(&raw_config)?;
 
-        let mut backend_loader = BackendLoader::new(rt_handle, plugin_dir);
+        let mut backend_loader = BackendLoader::new(rt_handle.clone(), plugin_dir);
 
         parse_detector_configs(
             rt_handle,
