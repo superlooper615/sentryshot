@@ -8,7 +8,7 @@ pub use storage::StorageImpl;
 
 use bytesize::ByteSize;
 use common::{
-    ArcLogger, ArcStorage, LogEntry, LogLevel, MonitorId, StorageUsageError,
+    ArcLogger, ArcStorage, Event, LogEntry, LogLevel, MonitorId, StorageUsageError,
     recording::{RecordingData, RecordingId, RecordingIdError},
     time::{Duration, UnixH264},
 };
@@ -125,6 +125,7 @@ pub struct RecDb {
 struct StartAndEnd {
     start_time: UnixH264,
     end_time: UnixH264,
+    events: Arc<std::sync::Mutex<Vec<Event>>>,
 }
 
 #[derive(Debug, Error)]
@@ -230,6 +231,7 @@ impl RecDb {
         &self,
         monitor_id: MonitorId,
         start_time: UnixH264,
+        events: Arc<std::sync::Mutex<Vec<Event>>>,
     ) -> Result<RecordingHandle, NewRecordingError> {
         use NewRecordingError::*;
         let start_time2: Timestamp = start_time.into();
@@ -263,6 +265,7 @@ impl RecDb {
                 StartAndEnd {
                     start_time,
                     end_time: start_time,
+                    events,
                 },
             );
         }
@@ -362,7 +365,11 @@ impl RecDb {
 
     pub async fn test_recording(&self) -> RecordingHandle {
         #[allow(clippy::unwrap_used)]
-        self.new_recording("test".to_owned().try_into().unwrap(), UnixH264::new(1))
+        self.new_recording(
+            "test".to_owned().try_into().unwrap(),
+            UnixH264::new(1),
+            Arc::new(std::sync::Mutex::new(Vec::new())),
+        )
             .await
             .unwrap()
     }
@@ -638,7 +645,11 @@ mod tests {
 
         let rec_db = new_test_recdb(&temp_dir.path().join("test")).await;
         let recording = rec_db
-            .new_recording("test".to_owned().try_into().unwrap(), UnixH264::new(1))
+            .new_recording(
+                "test".to_owned().try_into().unwrap(),
+                UnixH264::new(1),
+                Arc::new(std::sync::Mutex::new(Vec::new())),
+            )
             .await
             .unwrap();
         recording.new_file("meta").await.unwrap();
@@ -661,7 +672,11 @@ mod tests {
 
         assert!(
             rec_db
-                .new_recording(m_id.clone(), UnixH264::new(1))
+                .new_recording(
+                    m_id.clone(),
+                    UnixH264::new(1),
+                    Arc::new(std::sync::Mutex::new(Vec::new())),
+                )
                 .await
                 .is_err()
         );
@@ -670,7 +685,11 @@ mod tests {
 
         assert!(
             rec_db
-                .new_recording(m_id.clone(), UnixH264::new(1))
+                .new_recording(
+                    m_id.clone(),
+                    UnixH264::new(1),
+                    Arc::new(std::sync::Mutex::new(Vec::new())),
+                )
                 .await
                 .is_err()
         );

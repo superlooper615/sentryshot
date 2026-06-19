@@ -1634,7 +1634,11 @@ mod tests {
         samples: Vec<VideoSample>,
     ) {
         let rec = rec_db
-            .new_recording("x".to_owned().try_into().unwrap(), start_time)
+            .new_recording(
+                "x".to_owned().try_into().unwrap(),
+                start_time,
+                std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
+            )
             .await
             .unwrap();
 

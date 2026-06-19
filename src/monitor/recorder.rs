@@ -54,7 +54,7 @@ pub fn new_recorder(
 
         let mut state = if c.config.always_record() {
             c.log(LogLevel::Debug, "alwaysRecord=true");
-            State::Recording(RecordingSession::new(&token, None, c.clone(), None))
+            State::Recording(RecordingSession::new(&token, None, c.clone(), None, None))
         } else {
             c.log(LogLevel::Debug, "alwaysRecord=false");
             State::NotRecording(None)
@@ -114,6 +114,7 @@ pub fn new_recorder(
                                 Some(end),
                                 c.clone(),
                                 prev_seg,
+                                Some(event),
                             ));
                         }
                     };
@@ -136,6 +137,7 @@ struct RecordingSession {
     token: CancellationToken,
     logger: ArcMsgLogger,
     timer_end: Option<UnixNano>, // None if always record.
+    events: Arc<std::sync::Mutex<Vec<Event>>>,
     on_exit_rx: mpsc::Receiver<PrevSeg>,
 }
 
@@ -145,20 +147,23 @@ impl RecordingSession {
         timer_end: Option<UnixNano>,
         c: RecordingContext,
         mut prev_seg: PrevSeg,
+        initial_event: Option<Event>,
     ) -> Self {
         c.log(LogLevel::Debug, "starting recording session");
 
         let token = parent_token.child_token();
         let (on_exit_tx, on_exit_rx) = mpsc::channel::<PrevSeg>(1);
+        let events = Arc::new(std::sync::Mutex::new(initial_event.into_iter().collect()));
         let recording_session = RecordingSession {
             token: token.clone(),
             logger: c.logger.clone(),
             timer_end,
+            events: events.clone(),
             on_exit_rx,
         };
 
         tokio::spawn(async move {
-            run_recording_session(token, c, &mut prev_seg).await;
+            run_recording_session(token, c, &mut prev_seg, events).await;
             on_exit_tx
                 .send(prev_seg)
                 .await
@@ -186,6 +191,7 @@ impl RecordingSession {
                 self.timer_end = Some(end);
             }
         }
+        self.events.lock().expect("not poisoned").push(event);
     }
 
     fn sleep_until_timer_end(&self) -> Sleep {
@@ -225,10 +231,18 @@ async fn run_recording_session(
     recording_session_token: CancellationToken,
     c: RecordingContext,
     prev_seg: &mut PrevSeg,
+    events: Arc<std::sync::Mutex<Vec<Event>>>,
 ) {
     let restart_sleep = std::time::Duration::from_secs(3);
     loop {
-        if let Err(e) = run_recording(recording_session_token.clone(), c.clone(), prev_seg).await {
+        if let Err(e) = run_recording(
+            recording_session_token.clone(),
+            c.clone(),
+            prev_seg,
+            events.clone(),
+        )
+        .await
+        {
             c.log(LogLevel::Error, &format!("recording crashed: {e}"));
 
             tokio::select! {
@@ -279,6 +293,7 @@ async fn run_recording(
     recording_session_token: CancellationToken,
     c: RecordingContext,
     prev_seg: &mut PrevSeg,
+    events: Arc<std::sync::Mutex<Vec<Event>>>,
 ) -> Result<(), RunRecordingError> {
     let Some(muxer) = c.source_main.muxer().await else {
         c.log(LogLevel::Debug, "source cancelled");
@@ -295,7 +310,7 @@ async fn run_recording(
     let monitor_id = c.config.id().to_owned();
     let recording = c
         .recdb
-        .new_recording(monitor_id.clone(), start_time)
+        .new_recording(monitor_id.clone(), start_time, events.clone())
         .await?;
 
     let video_length = DurationH264::from(c.config.video_length());
@@ -345,6 +360,7 @@ async fn run_recording(
         &recording,
         UnixNano::from(start_time),
         UnixNano::from(end_time),
+        events.lock().expect("not poisoned").clone(),
     )
     .await?;
 
@@ -593,6 +609,7 @@ async fn save_recording(
     recording: &RecordingHandle,
     start_time: UnixNano,
     end_time: UnixNano,
+    events: Vec<Event>,
 ) -> Result<(), SaveRecordingError> {
     use SaveRecordingError::*;
     logger.log(LogLevel::Debug, &format!("saving recording: {rec_id:?}"));
@@ -600,7 +617,7 @@ async fn save_recording(
     let data = RecordingData {
         start: start_time,
         end: end_time,
-        events: Vec::new(),
+        events,
     };
 
     let json = serde_json::to_vec_pretty(&data)?;

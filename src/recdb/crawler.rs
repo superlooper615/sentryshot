@@ -85,10 +85,11 @@ fn recordings_by_query(
         }
 
         if let Some(active_rec) = active_recordings.get(&id) {
+            let events = active_rec.events.lock().expect("not poisoned").clone();
             let data = query.include_data.then(|| RecordingData {
                 start: active_rec.start_time.into(),
                 end: active_rec.end_time.into(),
-                events: Vec::new(),
+                events,
             });
             recordings.push(RecordingResponse::Active(RecordingActive { id, data }));
             continue;
