@@ -354,13 +354,15 @@ async fn run_recording(
         &format!("video generated: {:?}", recording.id()),
     );
 
+    let recording_events = events.lock().expect("not poisoned").clone();
+
     save_recording(
         c.logger.clone(),
         recording.id(),
         &recording,
         UnixNano::from(start_time),
         UnixNano::from(end_time),
-        events.lock().expect("not poisoned").clone(),
+        recording_events,
     )
     .await?;
 
