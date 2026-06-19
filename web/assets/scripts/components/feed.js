@@ -3,7 +3,6 @@
 // @ts-check
 
 import { uniqueID, htmlToElem } from "../libs/common.js";
-import { newDetectionOverlay } from "./detectionOverlay.js";
 
 const hlsConfig = {
 	maxDelaySec: 2,
@@ -47,7 +46,6 @@ function newFeed(Hls, monitor, preferLowRes, buttons = []) {
 	const index = `hls/${id}${res}/index.m3u8`;
 
 	let hls;
-	const abort = new AbortController();
 	const checkboxID = uniqueID();
 
 	const buttonElems = [];
@@ -87,7 +85,6 @@ function newFeed(Hls, monitor, preferLowRes, buttons = []) {
 					></div>
 				`,
 				[
-					newDetectionOverlay(abort.signal, id),
 					htmlToElem(/* HTML */ `
 						<input
 							id="${checkboxID}"
@@ -143,7 +140,6 @@ function newFeed(Hls, monitor, preferLowRes, buttons = []) {
 		elem,
 		enableDebugging() {},
 		destroy() {
-			abort.abort("cancelled");
 			if (hls) {
 				hls.destroy();
 			}

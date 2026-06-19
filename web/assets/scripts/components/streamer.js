@@ -3,7 +3,6 @@
 // @ts-check
 
 import { uniqueID, sleep, relativePathname, htmlToElem } from "../libs/common.js";
-import { newDetectionOverlay } from "./detectionOverlay.js";
 import { newFeed } from "./feed.js";
 import Hls from "../vendor/hls.js";
 
@@ -73,7 +72,6 @@ function newSlowPollStream(monitor, preferLowRes, buttons = []) {
 			></div>
 		`,
 		[
-			newDetectionOverlay(abort.signal, monitorId),
 			htmlToElem(/* HTML */ `
 				<input
 					id="${checkboxID}"

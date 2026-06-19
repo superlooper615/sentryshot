@@ -18,18 +18,6 @@ describe("feed", () => {
   <div class="relative flex justify-center items-center w-full"
        style="max-height: 100vh; align-self: center; --player-timeline-width: 90%;"
   >
-      <svg class="js-live-detections absolute w-full h-full"
-        style="
-  				z-index: 1;
-  				pointer-events: none;
-  				stroke: var(--color-red);
-  				fill-opacity: 0;
-  				stroke-width: calc(var(--scale) * 0.05rem);
-  			"
-        viewbox="0 0 100 100"
-        preserveaspectratio="none"
-      >
-      </svg>
     <input id="uid1"
            class="js-checkbox player-overlay-checkbox absolute"
            style="opacity: 0;"
