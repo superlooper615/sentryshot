@@ -14,7 +14,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
     fmt::Debug,
-    num::{NonZeroU8, NonZeroU16, NonZeroU64},
+    num::{NonZeroU8, NonZeroU16, NonZeroU64, NonZeroUsize},
     path::{Path, PathBuf},
 };
 use thiserror::Error;
@@ -76,12 +76,22 @@ struct RawDetectorConfigRemote {
 
     #[serde(default = "default_remote_timeout_ms")]
     timeout_ms: NonZeroU64,
+
+    #[serde(default = "default_remote_max_concurrent")]
+    max_concurrent: NonZeroUsize,
 }
 
 fn default_remote_timeout_ms() -> NonZeroU64 {
     match NonZeroU64::new(3000) {
         Some(v) => v,
         None => unreachable!("3000 is non-zero"),
+    }
+}
+
+fn default_remote_max_concurrent() -> NonZeroUsize {
+    match NonZeroUsize::new(1) {
+        Some(v) => v,
+        None => unreachable!("1 is non-zero"),
     }
 }
 
@@ -322,10 +332,12 @@ async fn parse_detector_configs(
         );
         let detector = RemoteDetector::new(
             rt_handle.clone(),
+            logger.clone(),
             remote.width,
             remote.height,
             remote.endpoint,
             remote.timeout_ms,
+            remote.max_concurrent,
         );
         detectors.insert(remote.name, detector);
     }
@@ -522,6 +534,7 @@ threads = 1
                 format: TfliteFormat::Nolo,
                 device: "14".parse().unwrap(),
             }],
+            remote: Vec::new(),
         };
         assert_eq!(want, got);
     }

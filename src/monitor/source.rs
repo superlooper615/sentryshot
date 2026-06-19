@@ -32,6 +32,7 @@ use url::Url;
 
 const RTSP_RESTART_DELAY: tokio::time::Duration = tokio::time::Duration::from_secs(2);
 const RTSP_RAW_FEED_BUFFER: usize = 64;
+const MAX_CAMERA_CLOCK_DRIFT: i64 = 60 * H264_SECOND;
 
 #[allow(clippy::module_name_repetitions)]
 pub struct MonitorSource {
@@ -480,8 +481,8 @@ fn parse_frame(
 fn check_clock_drift(pts: UnixH264) -> Result<(), SourceRtspRunError> {
     let now = UnixH264::now();
     let diff = (pts - now).abs();
-    // This shouldnt be more than one or two frames, but we will try 30 sec for now.
-    if diff > 30 * H264_SECOND {
+    // Source cameras can drift or reconnect with coarse timestamps; tolerate it unless it is large.
+    if diff > MAX_CAMERA_CLOCK_DRIFT {
         let diff_secs = diff / H264_SECOND;
         return if now < pts {
             Err(SourceRtspRunError::CameraClockAhead(diff_secs))
@@ -645,7 +646,6 @@ fn new_decoder(
                         LogLevel::Warning,
                         &format!("h264 decoder: dropped {dropped} raw frames; skipping ahead"),
                     );
-                    _ = frame_tx.send(Err(DroppedFrames)).await;
                     continue;
                 }
             };
@@ -699,12 +699,30 @@ fn new_decoder(
                 } else {
                     false
                 };
-                if !discard {
-                    _ = frame_tx.send(Ok(frame_decoded)).await;
+                if !discard && !send_decoded_frame(&frame_tx, &logger, frame_decoded) {
+                    return;
                 }
             }
         }
     });
 
     frame_rx
+}
+
+fn send_decoded_frame(
+    frame_tx: &mpsc::Sender<Result<Frame, DecoderError>>,
+    logger: &ArcMsgLogger,
+    frame: Frame,
+) -> bool {
+    match frame_tx.try_send(Ok(frame)) {
+        Ok(()) => true,
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            logger.log(
+                LogLevel::Debug,
+                "h264 decoder: dropped decoded frame because subscriber is busy",
+            );
+            true
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => false,
+    }
 }

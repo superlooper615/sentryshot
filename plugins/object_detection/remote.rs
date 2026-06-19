@@ -1,42 +1,48 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 use async_trait::async_trait;
-use common::{Detections, DynError};
+use common::{ArcMsgLogger, Detections, DynError, LogLevel};
 use plugin::object_detection::{ArcDetector, Detector};
 use serde::Deserialize;
 use std::{
     io::{Read, Write},
     net::{TcpStream, ToSocketAddrs},
-    num::{NonZeroU16, NonZeroU64},
+    num::{NonZeroU16, NonZeroU64, NonZeroUsize},
     sync::Arc,
     time::Duration,
 };
 use thiserror::Error;
-use tokio::runtime::Handle;
+use tokio::{runtime::Handle, sync::Semaphore};
 use url::Url;
 
 pub(crate) struct RemoteDetector {
     rt_handle: Handle,
+    logger: ArcMsgLogger,
     width: NonZeroU16,
     height: NonZeroU16,
     endpoint: Url,
     timeout: Duration,
+    semaphore: Arc<Semaphore>,
 }
 
 impl RemoteDetector {
     pub(crate) fn new(
         rt_handle: Handle,
+        logger: ArcMsgLogger,
         width: NonZeroU16,
         height: NonZeroU16,
         endpoint: Url,
         timeout_ms: NonZeroU64,
+        max_concurrent: NonZeroUsize,
     ) -> ArcDetector {
         Arc::new(Self {
             rt_handle,
+            logger,
             width,
             height,
             endpoint,
             timeout: Duration::from_millis(timeout_ms.get()),
+            semaphore: Arc::new(Semaphore::new(max_concurrent.get())),
         })
     }
 }
@@ -48,10 +54,18 @@ impl Detector for RemoteDetector {
         let height = self.height;
         let endpoint = self.endpoint.clone();
         let timeout = self.timeout;
+        let Ok(permit) = self.semaphore.clone().try_acquire_owned() else {
+            self.logger.log(
+                LogLevel::Debug,
+                "remote detector busy; dropping stale object-detection frame",
+            );
+            return Ok(Some(Vec::new()));
+        };
 
-        let task = self
-            .rt_handle
-            .spawn_blocking(move || detect_blocking(width, height, endpoint, timeout, data));
+        let task = self.rt_handle.spawn_blocking(move || {
+            let _permit = permit;
+            detect_blocking(width, height, endpoint, timeout, data)
+        });
 
         let detections = task.await.map_err(RemoteDetectError::Join)??;
         Ok(Some(detections))
@@ -74,11 +88,15 @@ fn detect_blocking(
     data: Vec<u8>,
 ) -> Result<Detections, RemoteDetectError> {
     if endpoint.scheme() != "http" {
-        return Err(RemoteDetectError::UnsupportedScheme(endpoint.scheme().to_owned()));
+        return Err(RemoteDetectError::UnsupportedScheme(
+            endpoint.scheme().to_owned(),
+        ));
     }
 
     let host = endpoint.host_str().ok_or(RemoteDetectError::MissingHost)?;
-    let port = endpoint.port_or_known_default().ok_or(RemoteDetectError::MissingPort)?;
+    let port = endpoint
+        .port_or_known_default()
+        .ok_or(RemoteDetectError::MissingPort)?;
     let mut addrs = (host, port).to_socket_addrs()?;
     let addr = addrs.next().ok_or(RemoteDetectError::ResolveEmpty)?;
     let mut stream = TcpStream::connect_timeout(&addr, timeout)?;
@@ -119,7 +137,10 @@ fn detect_blocking(
         .map_err(|_| RemoteDetectError::BadResponse("headers are not utf8"))?;
     let status = parse_status(headers)?;
     if status != 200 {
-        return Err(RemoteDetectError::Status(status, String::from_utf8_lossy(body).into()));
+        return Err(RemoteDetectError::Status(
+            status,
+            String::from_utf8_lossy(body).into(),
+        ));
     }
 
     let response: RemoteDetectResponse = serde_json::from_slice(body)?;

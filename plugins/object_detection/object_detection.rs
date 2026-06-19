@@ -239,9 +239,6 @@ enum RunError {
     #[error("process frame: {0}")]
     ProcessFrame(#[from] ProcessFrameError),
 
-    #[error("detect: {0}")]
-    Detect(DynError),
-
     #[error("parse detections: {0}")]
     ParseDetections(#[from] ParseDetectionsError),
 
@@ -376,13 +373,16 @@ impl ObjectDetectionPlugin {
                 .await
                 .expect("join")?;
 
-            let Some(detections) = detector
-                .detect(state.frame_processed.clone())
-                .await
-                .map_err(Detect)?
-            else {
-                // Canceled.
-                return Ok(());
+            let detections = match detector.detect(state.frame_processed.clone()).await {
+                Ok(Some(detections)) => detections,
+                Ok(None) => {
+                    // Canceled.
+                    return Ok(());
+                }
+                Err(e) => {
+                    msg_logger.log(LogLevel::Warning, &format!("detect skipped: {e}"));
+                    continue;
+                }
             };
             let detections =
                 parse_detections(&config.thresholds, &config.mask, &uncrop, detections)?;

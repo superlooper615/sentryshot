@@ -37,6 +37,7 @@ height = 340
 endpoint = "http://127.0.0.1:8765/detect"
 label_map = "https://codeberg.org/Curid/TF-CCTV/raw/branch/master/labels/person-map.txt"
 timeout_ms = 3000
+max_concurrent = 1
 
 
 # WebUI documentation: ./plugins/object_detection/README.md
